@@ -125,6 +125,7 @@ Rails.application.routes.draw do
       post :validate_key
     end
   end
+  delete "console/integrations/:id", to: "console/integrations#disconnect", as: :console_integration_connection
   # Create/edit forms for OAuth apps. Declared before the show route so
   # /console/oauth_apps/new wins over the generic `:id` match. Named
   # `*_oauth_app_form*` so the form helpers don't collide with the read
