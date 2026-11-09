@@ -37,7 +37,11 @@ class Grant < ApplicationRecord
 
   validate :exactly_one_grantee
   validate :exactly_one_grantable
-  validate :runlayer_personal_owner
+  # Checked when a grant is created or retargeted; disabling the owner later
+  # withholds delivery without making existing grants unsaveable.
+  validate :runlayer_personal_owner, if: -> {
+    new_record? || will_save_change_to_principal_id? || will_save_change_to_role_id? || will_save_change_to_static_secret_id?
+  }
   validates :priority, presence: true, numericality: { only_integer: true }
 
   # The grantee this grant attaches the secret to: a principal or a role.

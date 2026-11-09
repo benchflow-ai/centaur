@@ -1052,7 +1052,7 @@ The `provider` field is validated against the [supported providers](#supported-p
 | `description`          | optional    | |
 | `labels`               | optional    | |
 | `provider`             | required    | The provider strategy. See [supported providers](#supported-providers). |
-| `provider_config`      | conditional | Required for `"custom"` and must be empty (`{}`) otherwise. An object with `authorization_endpoint`, `token_endpoint`, `resource`, and optionally `userinfo_endpoint`, each an `https` URL. |
+| `provider_config`      | conditional | Required for `"custom"` and `"runlayer"`, and must be empty (`{}`) otherwise. For `"custom"`, an object with `authorization_endpoint`, `token_endpoint`, `resource`, and optionally `userinfo_endpoint`, each an `https` URL. For `"runlayer"`, an object with only `resource`: the tenant's exact `https://…/mcp` URL, which cannot change after creation. |
 | `client_id`            | required    | OAuth client id. Not secret; returned in responses. |
 | `client_secret`        | required on create | OAuth client secret. Write-only and encrypted at rest; on update it is only changed when supplied. Never returned. |
 | `allowed_scopes`       | required    | Non-empty array of scope strings the start endpoint requests. A flow's optional `scopes` param must be a subset; omitting it requests all of these. |

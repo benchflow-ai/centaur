@@ -51,9 +51,10 @@ class OauthApp < ApplicationRecord
 
   # The provider strategy backing this app, or nil if the provider column somehow
   # holds an unknown key (the inclusion validation normally prevents that). The
-  # custom provider is configured per app from provider_config.
+  # custom and runlayer providers are configured per app from provider_config.
   def provider_strategy
     return Oauth::Providers::Custom.new(self) if provider == Oauth::Providers::Custom::KEY
+    return Oauth::Providers::Runlayer.new(self) if provider == Oauth::Providers::Runlayer::KEY
 
     Oauth::Providers.fetch(provider)
   end
@@ -70,10 +71,6 @@ class OauthApp < ApplicationRecord
   end
 
   def credential_needs_reconnect?(credential)
-    if provider == "runlayer" && !provider_strategy.credential_resource_matches?(credential)
-      return true
-    end
-
     credential.dead? || (required_scopes - Array(credential.scopes)).any?
   end
 
@@ -87,7 +84,12 @@ class OauthApp < ApplicationRecord
     return unless provider == Oauth::Providers::Runlayer::KEY
 
     errors.add(:shared, "must be false for personal Runlayer connections") if shared?
-    errors.add(:base, "Set RUNLAYER_MCP_URL to an exact HTTPS Runlayer MCP URL") if enabled? && !provider_strategy.configured?
+    # Minted credentials and their wrapper rules are bound to the resource, so
+    # a different tenant is a new app rather than an edit.
+    if persisted? && provider_config_was.is_a?(Hash) && will_save_change_to_provider_config? &&
+        provider_config_was["resource"].present? && provider_config_was["resource"] != provider_config["resource"]
+      errors.add(:provider_config, "resource cannot be changed after creation; create a new app for another tenant")
+    end
   end
 
   def shared_configuration_valid
@@ -100,8 +102,10 @@ class OauthApp < ApplicationRecord
       errors.add(:provider_config, "must be a hash")
     elsif provider == Oauth::Providers::Custom::KEY
       Oauth::Providers::Custom.config_errors(provider_config).each { |message| errors.add(:provider_config, message) }
+    elsif provider == Oauth::Providers::Runlayer::KEY
+      Oauth::Providers::Runlayer.config_errors(provider_config).each { |message| errors.add(:provider_config, message) }
     elsif provider_config.present?
-      errors.add(:provider_config, "is only supported by the custom provider")
+      errors.add(:provider_config, "is only supported by the custom and runlayer providers")
     end
   end
 

@@ -147,7 +147,8 @@ See [docs/API.md](docs/API.md) for the full reference: authentication, request/r
 
 ## Personal Runlayer connections
 
-Set the same `RUNLAYER_MCP_URL` in Console web/workers, api-rs, proxy-sync and
-sandboxes. Each user connects through Integrations; verified Slack SSO links
-personal access in DMs and channels. Keep `tokenBroker.enabled: false` so Console
-refreshes tokens. See [setup and limits](../../tools/infra/runlayer/README.md).
+An administrator enters the tenant's MCP URL on the Runlayer card in
+Integrations, which registers the OAuth client. Each user then connects their
+own account; verified Slack SSO links personal access in DMs and channels, and
+token-broker refreshes the tokens. See
+[setup and limits](../../tools/infra/runlayer/README.md).

@@ -37,8 +37,12 @@ module Console
       preset = provider.preset
       app = OauthApp.find_by(slug: preset.fetch(:slug))
       unless app
+        # Providers bound to a tenant take its URL from the admin; registration
+        # then targets that tenant's endpoints.
+        provider_config = provider.respond_to?(:preset_config) ? provider.preset_config(params) : {}
+        provider = provider.class.new(config: provider_config) if provider_config.present?
         if provider.respond_to?(:configured?) && !provider.configured?
-          return redirect_to console_integrations_path, alert: "Configure the integration URL in the deployment environment."
+          return redirect_to console_integrations_path, alert: "Enter a valid #{provider.display_name} MCP URL."
         end
         registration = registration_client_factory.call.register(
           endpoint: provider.registration_endpoint,
@@ -47,7 +51,8 @@ module Console
           auth_method: provider.respond_to?(:token_endpoint_auth_method) ? provider.token_endpoint_auth_method : "client_secret_post"
         )
         begin
-          app = OauthApp.create!(preset.merge(registration).merge(provider: provider.key, enabled: true, created_by: current_user))
+          app = OauthApp.create!(preset.merge(registration).merge(provider: provider.key, provider_config: provider_config,
+            enabled: true, created_by: current_user))
         rescue ActiveRecord::RecordNotUnique
           app = OauthApp.find_by!(slug: preset.fetch(:slug))
         rescue ActiveRecord::RecordInvalid => error
@@ -94,12 +99,14 @@ module Console
       app.client_secret = secret if secret.present?
     end
 
-    # Only the custom provider takes a config; blank fields are dropped so the
-    # model reports them as missing.
+    # Only the custom and runlayer providers take a config; blank fields are
+    # dropped so the model reports them as missing.
     def provider_config_params(provider)
-      return {} unless provider == Oauth::Providers::Custom::KEY
+      keys = { Oauth::Providers::Custom::KEY => Oauth::Providers::Custom::CONFIG_KEYS,
+               Oauth::Providers::Runlayer::KEY => Oauth::Providers::Runlayer::CONFIG_KEYS }[provider]
+      return {} unless keys
 
-      app_params.fetch(:provider_config, ActionController::Parameters.new).permit(*Oauth::Providers::Custom::CONFIG_KEYS).to_h.transform_values(&:strip).compact_blank
+      app_params.fetch(:provider_config, ActionController::Parameters.new).permit(*keys).to_h.transform_values(&:strip).compact_blank
     end
 
     def app_params

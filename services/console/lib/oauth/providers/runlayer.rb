@@ -6,14 +6,50 @@ module Oauth
     # Credentials belong to the authenticated Console user. MCP OAuth does not
     # promise OIDC/userinfo, so we neither decode access tokens nor infer an
     # external account from email. Reconnecting replaces this owner's grant.
+    #
+    # The tenant's MCP URL is the app's provider_config "resource". It is fixed
+    # once the app exists, so every credential the app mints is bound to it, and
+    # the authorization, token, registration and revocation endpoints are the
+    # same-origin /api/v1/oauth/* paths. token-broker refreshes with the same
+    # resource indicator, read from provider_config.
     class Runlayer
       KEY = "runlayer"
       SCOPE = "mcp:proxy"
+      CONFIG_KEYS = %w[resource].freeze
+      URL_MESSAGE = "resource must be an exact HTTPS Runlayer MCP URL ending in /mcp".freeze
+
+      # Validation messages for a provider_config hash; empty when valid.
+      def self.config_errors(config)
+        unknown = config.keys - CONFIG_KEYS
+        errors = unknown.any? ? [ "has unknown keys: #{unknown.join(', ')}" ] : []
+        errors << URL_MESSAGE unless resource_uri(config["resource"])
+        errors
+      end
+
+      # The parsed resource URL, or nil unless it is an exact HTTPS MCP URL.
+      def self.resource_uri(raw)
+        return nil unless raw.is_a?(String) && raw.present? && raw == raw.strip
+
+        uri = URI.parse(raw)
+        return nil unless uri.is_a?(URI::HTTPS) && uri.host.present? && uri.port == 443 &&
+          uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil? && uri.path.end_with?("/mcp") &&
+          !raw.match?(/[*\[\]{}]/)
+
+        uri
+      rescue URI::InvalidURIError
+        nil
+      end
+
+      # Built per app from provider_config; the registry's unconfigured
+      # instance only names the provider and drives the admin preset.
+      def initialize(app = nil, config: nil)
+        @config = config || app&.provider_config || {}
+      end
 
       def key = KEY
       def display_name = "Runlayer"
       def configured? = resource_uri.present?
-      def resource_url = configured? ? ENV["RUNLAYER_MCP_URL"].to_s.strip : nil
+      def resource_url = configured? ? @config["resource"] : nil
       def authorization_endpoint = endpoint("authorize")
       def token_endpoint = endpoint("token")
       def registration_endpoint = endpoint("register")
@@ -24,6 +60,7 @@ module Oauth
       def authorization_scope_param = "scope"
       def scope_separator = " "
       def extra_authorization_params = { "resource" => resource_url }
+      def extra_token_params = { "resource" => resource_url }
       def refreshable? = true
       def parse_granted_scopes(scope) = scope.to_s.split
       def refresh_scopes(scopes) = Array(scopes)
@@ -39,9 +76,11 @@ module Oauth
           allowed_scopes: [ SCOPE ], shared: false, always_available: true }
       end
 
+      # The admin enters the tenant's MCP URL when registering the preset.
+      def preset_config(params) = { "resource" => params[:resource_url].to_s.strip }
+
       def identity_for_user(user)
-        { subject: "owner-#{user.oid}", name: "Your Runlayer connection",
-          labels: { "runlayer_resource" => resource_url } }
+        { subject: "owner-#{user.oid}", name: "Your Runlayer connection" }
       end
 
       def wrapping_secret_labels = { "centaur-tool" => KEY }
@@ -52,39 +91,12 @@ module Oauth
         raise Broker::ExchangeError.new("Runlayer scope was not granted", stage: "oauth", code: "missing_scope")
       end
 
-      def refresh_resource(credential)
-        unless configured?
-          raise Broker::RefreshError.new("Runlayer configuration is unavailable; refresh deferred", stage: "config", code: "configuration_unavailable", retryable: true)
-        end
-
-        unless credential_resource_matches?(credential)
-          raise Broker::RefreshError.new("Runlayer configuration changed; reconnect", stage: "oauth", code: "invalid_grant", retryable: false)
-        end
-        resource_url
-      end
-
-      def credential_resource_matches?(credential)
-        configured? && credential.labels["runlayer_resource"] == resource_url && credential.token_endpoint == token_endpoint
-      end
-
       private
 
-      def resource_uri
-        raw = ENV["RUNLAYER_MCP_URL"].to_s.strip
-        return nil if raw.empty?
-
-        uri = URI.parse(raw)
-        return nil unless uri.is_a?(URI::HTTPS) && uri.host.present? && uri.port == 443 &&
-          uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil? && uri.path.end_with?("/mcp") &&
-          !uri.path.match?(/[?*\[\]{}]/)
-
-        uri
-      rescue URI::InvalidURIError
-        nil
-      end
+      def resource_uri = self.class.resource_uri(@config["resource"])
 
       def resource_uri!
-        resource_uri || raise(Broker::ExchangeError.new("Set RUNLAYER_MCP_URL to an exact HTTPS Runlayer MCP URL", stage: "config"))
+        resource_uri || raise(Broker::ExchangeError.new(URL_MESSAGE, stage: "config"))
       end
 
       def endpoint(action)

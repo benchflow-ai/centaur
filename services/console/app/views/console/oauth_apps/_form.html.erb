@@ -47,7 +47,7 @@
 
     <section class="form-section">
       <h2 class="form-section-heading">Custom Provider</h2>
-      <p class="form-hint mb-4">Required for the custom provider only, and ignored by the others. Copy the values from the authorization server's metadata (<code>/.well-known/oauth-authorization-server</code>) and the protected resource's metadata (<code>/.well-known/oauth-protected-resource</code>).</p>
+      <p class="form-hint mb-4">Required for the custom provider and ignored by the others, except Runlayer, which uses only the resource URL (the tenant's exact <code>https://…/mcp</code> URL, fixed after creation). Copy the values from the authorization server's metadata (<code>/.well-known/oauth-authorization-server</code>) and the protected resource's metadata (<code>/.well-known/oauth-protected-resource</code>).</p>
       <div class="grid gap-5 sm:grid-cols-2">
         <% { "authorization_endpoint" => "Authorization endpoint", "token_endpoint" => "Token endpoint",
              "userinfo_endpoint" => "Userinfo endpoint (optional)", "resource" => "Resource URL" }.each do |key, label| %>
