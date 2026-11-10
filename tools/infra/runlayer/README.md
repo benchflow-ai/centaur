@@ -18,26 +18,30 @@ and tool definitions last only for one CLI invocation.
 
 An administrator opens **Integrations** in Console, enters the tenant's exact
 HTTPS Plugin MCP URL (ending in `/mcp`) on the Runlayer card, and connects.
-Console registers an OAuth client with the tenant and stores the URL as the
-app's `provider_config.resource`. Alternatively, create a `runlayer` OAuth App
-with that resource, its registered client ID/secret, scope `mcp:proxy`, and
-callback `<Console public URL>/oauth/<app-slug>/callback`. Availability in
-channels is automatic. No deployment environment variables are needed: the
-sandbox CLI reads the resource from Console's sandbox OAuth-app catalog.
+The preset registers an OAuth client with the tenant and creates an ordinary
+`custom` OAuth app with slug `runlayer`:
 
-The provider uses S256 PKCE, `client_secret_post`, RFC 8707 resource binding,
-and same-origin `/api/v1/oauth/{authorize,token,register,revoke}` endpoints;
-verify these against the tenant's OAuth metadata. token-broker refreshes
-tokens with the same resource. Tokens remain encrypted in Console and are
-injected by iron-proxy only for GET/POST/DELETE to the resource host and path.
+- `provider_config` holds the tenant's same-origin
+  `/api/v1/oauth/{authorize,token,revoke}` endpoints and the MCP URL as
+  `resource`; verify these against the tenant's OAuth metadata.
+- `owner_only: true`: each user's connection is keyed by their Console user
+  and serves only their own principals, never roles, other people, or email
+  matches.
+- `always_available: true`, so channel turns use the requester's connection.
+- label `centaur-tool: runlayer`, copied onto each user's wrapper secret.
 
-Disconnect removes local access even if remote revocation fails; follow the
-reported Runlayer revocation step in that case. Expired/dead credentials and
-disabled apps/users cannot supply tokens. The resource is fixed once the app
-exists: for another tenant, create a new app and have each user connect it.
+Nothing Runlayer-specific runs after setup. The flow uses S256 PKCE,
+`client_secret_post`, and RFC 8707 resource binding; token-broker refreshes with
+the same resource. Tokens stay encrypted in Console and iron-proxy injects them
+only for the resource host and path. The CLI reads the MCP URL from Console's
+sandbox OAuth-app catalog, so no deployment environment variables are needed.
+
+Disconnect removes local access, then revokes both tokens at the tenant. If
+revocation fails, Console says so; revoke the connection in Runlayer too.
+Expired or dead credentials and disabled apps or users cannot supply tokens.
 
 ## Validation
 
-Run the Python client, Console `personal_runlayer`, proxy-sync, and token-broker database tests.
+Run the Python client tests, Console's `owner_only_connections` tests, and the proxy-sync database tests.
 Verify two real users' distinct permissions, requester switching, disconnect and
 connector consent through a sandbox before rollout.

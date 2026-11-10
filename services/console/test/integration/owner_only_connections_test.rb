@@ -1,13 +1,18 @@
 require "test_helper"
 
-class PersonalRunlayerTest < ActionDispatch::IntegrationTest
-  RESOURCE = "https://runlayer.example.test/mcp"
+# Owner-only OAuth apps: each Console user connects their own account, which
+# serves only that user's principals. Exercised with a custom MCP app, the
+# shape the Runlayer preset creates.
+class OwnerOnlyConnectionsTest < ActionDispatch::IntegrationTest
+  ORIGIN = "https://mcp.example.test".freeze
+  RESOURCE = "#{ORIGIN}/mcp".freeze
+  CONFIG = { "authorization_endpoint" => "#{ORIGIN}/oauth/authorize", "token_endpoint" => "#{ORIGIN}/oauth/token",
+             "revocation_endpoint" => "#{ORIGIN}/oauth/revoke", "resource" => RESOURCE }.freeze
 
   setup do
-    @app = OauthApp.create!(slug: "runlayer", provider: "runlayer", provider_config: { "resource" => RESOURCE },
-      client_id: "registered-client",
-      client_secret: "synthetic-client-secret", allowed_scopes: [ "mcp:proxy" ],
-      created_by: users(:acme_admin))
+    @app = OauthApp.create!(slug: "personal-mcp", provider: "custom", provider_config: CONFIG, owner_only: true,
+      always_available: true, labels: { "centaur-tool" => "personal-mcp" }, client_id: "registered-client",
+      client_secret: "synthetic-client-secret", allowed_scopes: [ "mcp:proxy" ], created_by: users(:acme_admin))
     @alice = users(:member_user)
     @bob = users(:acme_admin)
     @alice_principal = principals(:acme_user_alice)
@@ -23,23 +28,23 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
   teardown do
     Console::OauthAppsController.registration_client_factory = -> { Oauth::DynamicRegistration.new }
     Oauth::FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new }
-    Console::IntegrationsController.disconnect_service_factory = -> { Oauth::DisconnectRunlayer.new }
+    Console::IntegrationsController.disconnect_service_factory = -> { Oauth::Disconnect.new }
   end
 
   test "OAuth connects two owners and each principal serves only its own token" do
     alice_credential = connect(@alice, "synthetic-alice")
     bob_credential = connect(@bob, "synthetic-bob")
     refute_equal alice_credential.id, bob_credential.id
+    assert_equal "owner-#{@alice.oid}", alice_credential.provider_subject
+    assert_nil alice_credential.provider_email
     assert_equal [ @alice_principal.id ], alice_credential.static_secret.grants.pluck(:principal_id)
     assert_equal [ @bob_principal.id ], bob_credential.static_secret.grants.pluck(:principal_id)
-    assert_equal({ "centaur-tool" => "runlayer" }, alice_credential.static_secret.labels)
+    assert_equal({ "centaur-tool" => "personal-mcp" }, alice_credential.static_secret.labels)
     [ [ @alice_principal, "synthetic-alice" ], [ @bob_principal, "synthetic-bob" ],
       [ principals(:acme_channel), nil ] ].each do |principal, expected|
-      entries = runlayer_entries(principal)
+      entries = owner_entries(principal)
       assert_equal expected ? [ expected ] : [], entries.map { |entry| entry.dig("source", "value") }
-      entries.each do |entry|
-        assert_equal [ { "host" => "runlayer.example.test", "methods" => %w[GET POST DELETE], "paths" => [ "/mcp" ] } ], entry["rules"]
-      end
+      entries.each { |entry| assert_equal [ "/mcp" ], entry["rules"].sole["paths"] }
     end
   end
 
@@ -53,26 +58,35 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
     assert_response :bad_request
   end
 
+  test "callback rejects tampered states and endpoint changes since the flow started" do
+    login(@alice)
+    state = start_flow
+    get oauth_callback_url(slug: @app.slug), params: { state: "tampered", code: "unused" }
+    assert_response :bad_request
+    @app.update!(provider_config: CONFIG.merge("token_endpoint" => "https://other.example.test/oauth/token"))
+    assert_no_difference "BrokerCredential.count" do
+      get oauth_callback_url(slug: @app.slug), params: { state: state, code: "unused" }
+    end
+    assert_response :bad_request
+  end
+
   test "a mismatched wrapper source cannot substitute another owners token" do
     alice = connect(@alice, "synthetic-alice")
     bob = connect(@bob, "synthetic-bob")
     alice.static_secret.source.update!(config: { "credential_id" => bob.oid })
-    assert_empty runlayer_entries
+    assert_empty owner_entries
     connect(@alice, "synthetic-alice-reconnected")
-    assert_equal [ "synthetic-alice-reconnected" ], runlayer_entries.map { |entry| entry.dig("source", "value") }
+    assert_equal [ "synthetic-alice-reconnected" ], owner_entries.map { |entry| entry.dig("source", "value") }
   end
 
-  test "callback rejects tampered states" do
-    login(@alice)
-    start_flow
-    get oauth_callback_url(slug: @app.slug), params: { state: "tampered", code: "unused" }
-    assert_response :bad_request
-  end
-
-  test "the tenant resource is fixed once the app exists" do
-    @app.provider_config = { "resource" => "https://other.example.test/mcp" }
+  test "owner_only is fixed at creation and incompatible with shared apps" do
+    @app.owner_only = false
     refute @app.valid?
-    assert_includes @app.errors[:provider_config].join, "cannot be changed"
+    assert @app.errors[:owner_only].any?
+    shared = OauthApp.new(slug: "shared-owner", provider: "custom", provider_config: CONFIG, owner_only: true, shared: true,
+      client_id: "c", client_secret: "s", allowed_scopes: [ "mcp:proxy" ], created_by: users(:acme_admin))
+    refute shared.valid?
+    assert shared.errors[:owner_only].any?
   end
 
   test "connected credentials carry what token-broker needs to refresh with the resource" do
@@ -82,8 +96,7 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
       FROM broker_credentials JOIN oauth_apps ON oauth_apps.id = broker_credentials.oauth_app_id
       WHERE broker_credentials.id = #{credential.id}
     SQL
-    assert_equal({ "provider" => "runlayer", "resource" => RESOURCE,
-                   "token_endpoint" => "https://runlayer.example.test/api/v1/oauth/token" }, row)
+    assert_equal({ "provider" => "custom", "resource" => RESOURCE, "token_endpoint" => CONFIG["token_endpoint"] }, row)
     assert credential.refresh_token.present?
     assert credential.next_attempt_at
   end
@@ -96,14 +109,15 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
     refute credential.reload.dead?
     login(@alice)
     http = HttpClient.new(http: ->(**) { raise Timeout::Error })
-    Console::IntegrationsController.disconnect_service_factory = -> { Oauth::DisconnectRunlayer.new(http: http) }
+    Console::IntegrationsController.disconnect_service_factory = -> { Oauth::Disconnect.new(http: http) }
     delete console_integration_connection_url(credential.oid)
     assert_redirected_to console_integrations_path
+    assert_match "Remote revocation failed", flash[:notice]
     assert credential.reload.dead?
     assert_nil credential.refresh_token
-    assert_empty runlayer_entries
+    assert_empty owner_entries
     connect(@alice, "synthetic-reconnected")
-    assert_equal [ "synthetic-reconnected" ], runlayer_entries.map { |entry| entry.dig("source", "value") }
+    assert_equal [ "synthetic-reconnected" ], owner_entries.map { |entry| entry.dig("source", "value") }
   end
 
   test "reconnect reloads a credential disconnected after the callback reads it" do
@@ -118,7 +132,7 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
       stale = lookup.call(**attributes)
       assert_equal credential.id, stale.id
       refute stale.dead?
-      Oauth::DisconnectRunlayer.new(http: revoke_http).call(BrokerCredential.find(credential.id))
+      Oauth::Disconnect.new(http: revoke_http).call(BrokerCredential.find(credential.id))
       assert credential.reload.dead?
       interleaved = true
       stale
@@ -135,18 +149,18 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
     assert_equal "synthetic-after", credential.access_token
     assert_equal "synthetic-refresh", credential.refresh_token
     assert credential.next_attempt_at
-    assert_equal [ "synthetic-after" ], runlayer_entries.map { |entry| entry.dig("source", "value") }
+    assert_equal [ "synthetic-after" ], owner_entries.map { |entry| entry.dig("source", "value") }
   end
 
-  test "disconnect revokes both tokens and a queued refresh cannot reconnect" do
+  test "disconnect revokes both tokens and leaves nothing for token-broker to refresh" do
     credential = connect(@alice, "synthetic-alice")
     seen = []
     transport = ->(**request) do
-      assert_equal "https://runlayer.example.test/api/v1/oauth/revoke", request[:url]
+      assert_equal CONFIG["revocation_endpoint"], request[:url]
       seen << URI.decode_www_form(request[:body]).to_h.fetch("token_type_hint")
       HttpClient::Response.new(status: 200, body: "")
     end
-    assert Oauth::DisconnectRunlayer.new(http: HttpClient.new(http: transport)).call(credential)
+    assert_equal :revoked, Oauth::Disconnect.new(http: HttpClient.new(http: transport)).call(credential)
     assert_equal %w[refresh_token access_token], seen
     credential.reload
     # token-broker only refreshes live credentials (dead = false).
@@ -155,23 +169,35 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
     assert_nil credential.next_attempt_at
   end
 
+  test "disconnect without a revocation endpoint removes local access only" do
+    @app.update!(provider_config: CONFIG.except("revocation_endpoint"))
+    credential = connect(@alice, "synthetic-alice")
+    transport = ->(**) { flunk "no revocation endpoint is configured" }
+    assert_equal :local_only, Oauth::Disconnect.new(http: HttpClient.new(http: transport)).call(credential)
+    assert credential.reload.dead?
+    assert_empty owner_entries
+  end
+
   test "no role grants email matching expired disabled or dead credentials" do
     credential = connect(@alice, "synthetic-alice")
     @bob_principal.update!(labels: { "email" => @alice.email })
     PrincipalCredentialReconciliation.new.apply_for_principal(@bob_principal)
     refute credential.static_secret.grants.exists?(principal: @bob_principal)
-    grant = Grant.new(role: roles(:acme_infra), static_secret: credential.static_secret, created_by: @alice)
-    refute grant.valid?
+    refute Grant.new(role: roles(:acme_infra), static_secret: credential.static_secret, created_by: @alice).valid?
+    refute Grant.new(principal: @bob_principal, static_secret: credential.static_secret, created_by: @alice).valid?
     credential.update!(expires_at: 1.minute.ago)
-    assert_empty runlayer_entries
+    assert_empty owner_entries
     credential.update!(expires_at: 1.hour.from_now, dead: true)
-    assert_empty runlayer_entries
+    assert_empty owner_entries
     credential.update!(dead: false)
     @app.update!(enabled: false)
-    assert_empty runlayer_entries
+    assert_empty owner_entries
     @app.update!(enabled: true)
     @alice.update!(status: :disabled)
-    assert_empty runlayer_entries
+    assert_empty owner_entries
+    # Disabling the owner withholds delivery without making the grant unsaveable.
+    grant = credential.static_secret.grants.sole
+    assert grant.update(priority: grant.priority + 1)
   end
 
   test "catalog exposes only public connection metadata and consent states are single use" do
@@ -185,10 +211,12 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
       get "/api/v1/sandbox/oauth_apps", headers: { "Authorization" => "Bearer #{token}" }
     end
     assert_response :ok
-    app = JSON.parse(response.body).fetch("data").find { |row| row["provider"] == "runlayer" }
+    app = JSON.parse(response.body).fetch("data").find { |row| row["slug"] == @app.slug }
     assert_equal RESOURCE, app.fetch("resource")
+    assert app.fetch("owner_only")
     refute app.key?("client_secret")
     refute app.key?("client_id")
+    refute app.key?("provider_config")
     login(@alice)
     get console_integrations_url
     assert_select "form[action=?]", console_integration_connection_path(credential.oid)
@@ -203,47 +231,30 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
     assert_response :unprocessable_entity
   end
 
-  test "a Runlayer app must be personal and have an exact resource" do
-    @app.shared = true
-    refute @app.valid?
-    [ nil, "http://runlayer.example.test/mcp", "https://user:password@example.test/mcp",
-      "https://example.test/mcp?token=x", "https://example.test/*/mcp", "https://example.test:8443/mcp",
-      "https://example.test/other" ].each do |url|
-      app = OauthApp.new(slug: "runlayer-invalid", provider: "runlayer", provider_config: { "resource" => url }.compact,
-        client_id: "c", client_secret: "s", allowed_scopes: [ "mcp:proxy" ], created_by: users(:acme_admin))
-      refute app.valid?, url.inspect
-      assert app.errors[:provider_config].any?, url.inspect
-    end
-  end
-
-  test "Runlayer fixes personal requester availability" do
-    @app.always_available = false
-    assert @app.valid?
-    assert @app.always_available?
+  test "the admin form sets owner_only only at creation" do
     login(@bob)
-    get console_integrations_url
-    assert_select "form[action=?]", console_oauth_app_preset_path(provider: "runlayer"), count: 0
     get edit_console_oauth_app_form_path(@app.oid)
-    assert_select "input[name='oauth_app[always_available]'][disabled]"
-    assert_select "input[name='oauth_app[shared]'][disabled]"
+    assert_select "input[name='oauth_app[owner_only]'][disabled][checked]"
+    get new_console_oauth_app_form_path
+    assert_select "input[name='oauth_app[owner_only]']:not([disabled])"
   end
 
-  test "admin preset registers the tenant the admin enters" do
-    @app.destroy!
+  test "Runlayer preset registers an owner-only custom app for the tenant the admin enters" do
     login(@bob)
     get console_integrations_url
     assert_select "form[action=?] input[name=resource_url]", console_oauth_app_preset_path(provider: "runlayer")
     calls = []
     transport = ->(**request) do
       calls << request
-      assert_equal "https://runlayer.example.test/api/v1/oauth/register", request[:url]
+      assert_equal "https://tenant.runlayer.test/api/v1/oauth/register", request[:url]
       body = JSON.parse(request[:body])
       assert_equal "client_secret_post", body["token_endpoint_auth_method"]
       assert_equal "mcp:proxy", body["scope"]
       HttpClient::Response.new(status: 201, body: { client_id: "registered-client", client_secret: "synthetic-client-secret" }.to_json)
     end
     Console::OauthAppsController.registration_client_factory = -> { Oauth::DynamicRegistration.new(http: HttpClient.new(http: transport)) }
-    [ nil, "http://runlayer.example.test/mcp" ].each do |url|
+    [ nil, "http://tenant.runlayer.test/mcp", "https://tenant.runlayer.test/other", "https://u:p@tenant.runlayer.test/mcp",
+      "https://tenant.runlayer.test/mcp?x=1", "https://tenant.runlayer.test:8443/mcp" ].each do |url|
       assert_no_difference "OauthApp.count" do
         post console_oauth_app_preset_path(provider: "runlayer"), params: { resource_url: url }.compact
       end
@@ -251,18 +262,36 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
     end
     assert_empty calls
     assert_difference "OauthApp.count", 1 do
-      post console_oauth_app_preset_path(provider: "runlayer"), params: { resource_url: " #{RESOURCE} " }
+      post console_oauth_app_preset_path(provider: "runlayer"), params: { resource_url: " https://tenant.runlayer.test/mcp " }
     end
-    @app = OauthApp.find_by!(slug: "runlayer")
-    assert_equal({ "resource" => RESOURCE }, @app.provider_config)
-    assert @app.always_available?
-    refute @app.shared?
+    app = OauthApp.find_by!(slug: "runlayer")
     assert_redirected_to oauth_start_path(slug: "runlayer")
+    assert_equal "custom", app.provider
+    assert app.owner_only?
+    assert app.always_available?
+    refute app.shared?
+    assert_equal({ "centaur-tool" => "runlayer" }, app.labels)
+    assert_equal({ "authorization_endpoint" => "https://tenant.runlayer.test/api/v1/oauth/authorize",
+                   "token_endpoint" => "https://tenant.runlayer.test/api/v1/oauth/token",
+                   "revocation_endpoint" => "https://tenant.runlayer.test/api/v1/oauth/revoke",
+                   "resource" => "https://tenant.runlayer.test/mcp" }, app.provider_config)
     assert_no_difference "OauthApp.count" do
       post console_oauth_app_preset_path(provider: "runlayer")
     end
     assert_equal 1, calls.length
-    assert_equal RESOURCE, @app.reload.provider_strategy.resource_url
+    get console_integrations_url
+    assert_select "form[action=?]", console_oauth_app_preset_path(provider: "runlayer"), count: 0
+  end
+
+  test "disconnect works for any personal connection" do
+    google = oauth_apps(:acme_google)
+    credential = BrokerCredential.create!(oauth_app: google, created_by: @alice, provider_subject: "alice-google",
+      foreign_id: "google-acme-alice", name: "Google – alice", token_endpoint: "https://oauth2.example.test/token",
+      access_token: "synthetic-google", refresh_token: "synthetic-google-refresh", external_user_key: SecureRandom.hex(8))
+    login(@alice)
+    delete console_integration_connection_url(credential.oid)
+    assert_redirected_to console_integrations_path
+    assert credential.reload.dead?
   end
 
   private
@@ -290,6 +319,7 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
       assert_equal RESOURCE, request[:form]["resource"]
       assert_equal "authorization_code", request[:form]["grant_type"]
       assert request[:form]["code_verifier"].present?
+      # An opaque (non-JWT) token: owner-only apps never decode it.
       HttpClient::Response.new(status: 200, body: { access_token: access_token,
         refresh_token: "synthetic-refresh", expires_in: 3600, scope: "mcp:proxy" }.to_json)
     end
@@ -299,9 +329,9 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
     BrokerCredential.find_by!(oauth_app: @app, created_by: user)
   end
 
-  def runlayer_entries(principal = @alice_principal)
+  def owner_entries(principal = @alice_principal)
     PrincipalSyncConfig.config_for(principal.reload).fetch("secrets").select do |entry|
-      entry["rules"].any? { |rule| rule["host"] == "runlayer.example.test" }
+      entry["rules"].any? { |rule| rule["host"] == "mcp.example.test" }
     end
   end
 end

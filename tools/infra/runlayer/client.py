@@ -15,6 +15,7 @@ from referencing.exceptions import Unresolvable
 
 MAX_BYTES = 8 * 1024 * 1024
 PROTOCOL = "2025-03-26"
+APP_SLUG = "runlayer"
 
 
 class RunlayerError(RuntimeError):
@@ -86,12 +87,17 @@ class RunlayerClient:
             ) from None
         if not isinstance(apps, list):
             raise RunlayerError("Centaur Console returned an invalid OAuth-app catalog.")
+        # Console's Runlayer preset registers an owner-only app with this slug.
         matches = [
-            app for app in apps if isinstance(app, dict) and app.get("provider") == "runlayer"
+            app
+            for app in apps
+            if isinstance(app, dict)
+            and app.get("slug") == APP_SLUG
+            and app.get("owner_only") is True
         ]
         if len(matches) != 1:
             raise RunlayerError(
-                "Ask an administrator to configure one personal Runlayer integration in Console."
+                "Ask an administrator to set up the Runlayer integration in Console Integrations."
             )
         # The tenant URL is the app's public resource; the bearer is injected
         # by iron-proxy only for that host and path.

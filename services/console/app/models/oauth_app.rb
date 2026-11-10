@@ -30,9 +30,13 @@ class OauthApp < ApplicationRecord
 
   encrypts :client_secret
 
-  # Runlayer always follows the requester, including channel turns. This is
-  # fixed provider behavior, rather than an operator-selectable flow policy.
-  before_validation :set_runlayer_availability
+  # owner_only: each Console user connects their own account (the credential is
+  # keyed by that user, not by a provider identity), and its token is delivered
+  # only to that user's own principals through a direct grant -- never through
+  # roles, other principals, or email matching -- and only while the token is
+  # live, the app enabled, and the user active. Enforced in Console
+  # (PrincipalCredentialReconciliation#connection_owner?, Grant, SecretSource)
+  # and in proxy-sync (crates/centaur-console-db/sql/effective_credentials.sql).
 
   # The slug is the app's whole identity: globally unique and URL-safe. It both
   # addresses the app in the API (oid or slug) and names the consent links, so it
@@ -46,15 +50,14 @@ class OauthApp < ApplicationRecord
   validate :labels_is_a_hash
   validate :allowed_scopes_valid
   validate :shared_configuration_valid
+  validate :owner_only_configuration_valid
   validate :provider_config_valid
-  validate :runlayer_configuration_valid
 
   # The provider strategy backing this app, or nil if the provider column somehow
   # holds an unknown key (the inclusion validation normally prevents that). The
-  # custom and runlayer providers are configured per app from provider_config.
+  # custom provider is configured per app from provider_config.
   def provider_strategy
     return Oauth::Providers::Custom.new(self) if provider == Oauth::Providers::Custom::KEY
-    return Oauth::Providers::Runlayer.new(self) if provider == Oauth::Providers::Runlayer::KEY
 
     Oauth::Providers.fetch(provider)
   end
@@ -76,25 +79,15 @@ class OauthApp < ApplicationRecord
 
   private
 
-  def set_runlayer_availability
-    self.always_available = true if provider == Oauth::Providers::Runlayer::KEY
-  end
-
-  def runlayer_configuration_valid
-    return unless provider == Oauth::Providers::Runlayer::KEY
-
-    errors.add(:shared, "must be false for personal Runlayer connections") if shared?
-    # Minted credentials and their wrapper rules are bound to the resource, so
-    # a different tenant is a new app rather than an edit.
-    if persisted? && provider_config_was.is_a?(Hash) && will_save_change_to_provider_config? &&
-        provider_config_was["resource"].present? && provider_config_was["resource"] != provider_config["resource"]
-      errors.add(:provider_config, "resource cannot be changed after creation; create a new app for another tenant")
-    end
-  end
-
   def shared_configuration_valid
     errors.add(:shared, "cannot be changed after creation") if persisted? && will_save_change_to_shared?
     errors.add(:shared, "cannot be always available to the connecting user") if shared? && always_available?
+  end
+
+  def owner_only_configuration_valid
+    # Credentials are keyed differently with and without owner_only.
+    errors.add(:owner_only, "cannot be changed after creation") if persisted? && will_save_change_to_owner_only?
+    errors.add(:owner_only, "cannot be combined with a shared app") if owner_only? && shared?
   end
 
   def provider_config_valid
@@ -102,10 +95,8 @@ class OauthApp < ApplicationRecord
       errors.add(:provider_config, "must be a hash")
     elsif provider == Oauth::Providers::Custom::KEY
       Oauth::Providers::Custom.config_errors(provider_config).each { |message| errors.add(:provider_config, message) }
-    elsif provider == Oauth::Providers::Runlayer::KEY
-      Oauth::Providers::Runlayer.config_errors(provider_config).each { |message| errors.add(:provider_config, message) }
     elsif provider_config.present?
-      errors.add(:provider_config, "is only supported by the custom and runlayer providers")
+      errors.add(:provider_config, "is only supported by the custom provider")
     end
   end
 

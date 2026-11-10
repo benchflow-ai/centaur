@@ -145,10 +145,13 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).
 
-## Personal Runlayer connections
+## Owner-only OAuth apps
 
-An administrator enters the tenant's MCP URL on the Runlayer card in
-Integrations, which registers the OAuth client. Each user then connects their
-own account; verified Slack SSO links personal access in DMs and channels, and
-token-broker refreshes the tokens. See
-[setup and limits](../../tools/infra/runlayer/README.md).
+An OAuth app with `owner_only` gives each Console user their own connection.
+The credential is keyed by the connecting user, so the provider needs no
+identity endpoint, and its token reaches only that user's own principals, in
+DMs and, with `always_available`, in channels. It never reaches roles, other
+principals, or email matches. Users can disconnect from Integrations; a
+`custom` app's optional `revocation_endpoint` revokes the tokens at the
+provider. The Runlayer preset sets one up for a tenant's MCP URL; see
+[Runlayer setup](../../tools/infra/runlayer/README.md).

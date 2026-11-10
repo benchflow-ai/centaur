@@ -1052,12 +1052,13 @@ The `provider` field is validated against the [supported providers](#supported-p
 | `description`          | optional    | |
 | `labels`               | optional    | |
 | `provider`             | required    | The provider strategy. See [supported providers](#supported-providers). |
-| `provider_config`      | conditional | Required for `"custom"` and `"runlayer"`, and must be empty (`{}`) otherwise. For `"custom"`, an object with `authorization_endpoint`, `token_endpoint`, `resource`, and optionally `userinfo_endpoint`, each an `https` URL. For `"runlayer"`, an object with only `resource`: the tenant's exact `https://…/mcp` URL, which cannot change after creation. |
+| `provider_config`      | conditional | Required for `"custom"` and must be empty (`{}`) otherwise. An object with `authorization_endpoint`, `token_endpoint`, `resource`, and optionally `userinfo_endpoint` and `revocation_endpoint` (RFC 7009, used by Disconnect), each an `https` URL. |
 | `client_id`            | required    | OAuth client id. Not secret; returned in responses. |
 | `client_secret`        | required on create | OAuth client secret. Write-only and encrypted at rest; on update it is only changed when supplied. Never returned. |
 | `allowed_scopes`       | required    | Non-empty array of scope strings the start endpoint requests. A flow's optional `scopes` param must be a subset; omitting it requests all of these. |
 | `enabled`              | optional    | Defaults to `true`. A disabled app rejects new consent flows; existing credentials keep refreshing. |
 | `shared`               | optional    | Defaults to `false`. One admin-connected account with role-granted access. Create-only; changes return `422`. Incompatible with `always_available`. |
+| `owner_only`           | optional    | Defaults to `false`. Each Console user's connection is keyed by that user (no provider identity is resolved) and its token is delivered only to that user's own principals through a direct grant -- never roles, other principals, or email matching -- and only while live, the app enabled, and the user active. Create-only; changes return `422`. Incompatible with `shared`. |
 
 The `client_secret` is required and write-only: it is accepted on writes but never returned in any response.
 
@@ -1111,7 +1112,7 @@ Returns `201`. The `client_secret` is never echoed back:
 
 `GET /api/v1/sandbox/oauth_apps`
 
-Returns enabled non-shared OAuth apps and the console URLs a sandbox user can open to start consent. Authenticate with the same sandbox entitlement JWT as `GET /api/v1/sandbox/permissions`. The token signature, issuer, audience, and expiry are verified. Proxy and principal claims are not checked because these URLs are not sensitive.
+Returns enabled non-shared OAuth apps and the console URLs a sandbox user can open to start consent. `resource` is the app's protected resource URL (for example an MCP URL) when it has one. Authenticate with the same sandbox entitlement JWT as `GET /api/v1/sandbox/permissions`. The token signature, issuer, audience, and expiry are verified. Proxy and principal claims are not checked because these URLs are not sensitive.
 
 ```json
 {
@@ -1123,6 +1124,8 @@ Returns enabled non-shared OAuth apps and the console URLs a sandbox user can op
       "labels": {},
       "provider": "google",
       "allowed_scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+      "owner_only": false,
+      "resource": null,
       "start_url": "https://<iron-control>/oauth/google/start"
     }
   ]

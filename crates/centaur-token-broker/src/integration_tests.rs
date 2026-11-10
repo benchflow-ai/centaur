@@ -632,44 +632,6 @@ async fn custom_app_credentials_refresh_with_the_apps_resource_indicator() {
 }
 
 #[tokio::test]
-async fn runlayer_credentials_refresh_with_scope_and_the_apps_resource_indicator() {
-    let fixture = fixture![(200, json!({"access_token": "AT"}))];
-    let id = fixture
-        .credential("refresh_token", &[("refresh_token", "RT")])
-        .await;
-    fixture
-        .link_oauth_app(id, "runlayer", "cid", "secret")
-        .await;
-    sqlx::query(
-        "UPDATE oauth_apps SET provider_config = '{\"resource\": \"https://tenant.example.test/mcp\"}' \
-         WHERE id = (SELECT oauth_app_id FROM broker_credentials WHERE id = $1)",
-    )
-    .bind(id)
-    .execute(&fixture.pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE broker_credentials SET scopes = '[\"mcp:proxy\"]' WHERE id = $1")
-        .bind(id)
-        .execute(&fixture.pool)
-        .await
-        .unwrap();
-
-    fixture.refresh(id).await;
-
-    assert_eq!(
-        fixture.requests()[0].form(),
-        form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", "RT"),
-            ("client_id", "cid"),
-            ("client_secret", "secret"),
-            ("scope", "mcp:proxy"),
-            ("resource", "https://tenant.example.test/mcp"),
-        ])
-    );
-}
-
-#[tokio::test]
 async fn credentials_that_cannot_build_a_request_back_off() {
     let fixture = fixture![];
     let unknown_provider = fixture

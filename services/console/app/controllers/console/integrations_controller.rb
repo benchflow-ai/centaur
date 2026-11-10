@@ -9,15 +9,21 @@
 class Console::IntegrationsController < ApplicationController
   layout "console"
 
-  class_attribute :disconnect_service_factory, default: -> { Oauth::DisconnectRunlayer.new }
+  class_attribute :disconnect_service_factory, default: -> { Oauth::Disconnect.new }
 
+  DISCONNECT_NOTICES = {
+    revoked: "%s disconnected.",
+    local_only: "%s disconnected from Centaur. The provider offers no revocation endpoint; revoke access there if needed.",
+    failed: "%s disconnected from Centaur. Remote revocation failed; revoke the connection with the provider too."
+  }.freeze
+
+  # Disconnects one of the current user's own personal connections.
   def disconnect
     credential = BrokerCredential.joins(:oauth_app)
-      .where(created_by: current_user, oauth_apps: { provider: "runlayer", shared: false })
+      .where(created_by: current_user, oauth_apps: { shared: false })
       .find_by_oid!(params[:id])
-    revoked = disconnect_service_factory.call.call(credential)
-    message = revoked ? "Runlayer disconnected." : "Runlayer disconnected from Centaur. Remote revocation failed; revoke the connection in Runlayer too."
-    redirect_to console_integrations_path, notice: message
+    outcome = disconnect_service_factory.call.call(credential)
+    redirect_to console_integrations_path, notice: format(DISCONNECT_NOTICES.fetch(outcome), credential.oauth_app.slug)
   end
 
   def index
@@ -25,9 +31,12 @@ class Console::IntegrationsController < ApplicationController
     @oauth_apps = OauthApp.where(enabled: true).order(:slug)
     @oauth_apps = @oauth_apps.where(shared: false) unless acting_admin?
     @presets = if acting_admin?
-      configured = OauthApp.distinct.pluck(:provider)
-      Oauth::Providers.registry.values.select do |provider|
-        provider.respond_to?(:preset) && provider.respond_to?(:registration_endpoint) && !configured.include?(provider.key)
+      # Hidden once its app exists; a provider-backed preset also once any app
+      # uses that provider.
+      slugs = OauthApp.pluck(:slug)
+      providers = OauthApp.distinct.pluck(:provider)
+      Oauth::Presets.all.reject do |preset|
+        slugs.include?(preset.preset.fetch(:slug)) || (!preset.preset.key?(:provider) && providers.include?(preset.key))
       end
     else
       []

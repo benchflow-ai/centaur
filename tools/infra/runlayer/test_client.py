@@ -36,7 +36,8 @@ def test_configuration_lifecycle_pagination_and_schema(monkeypatch):
                 json={
                     "data": [
                         {
-                            "provider": "runlayer",
+                            "slug": "runlayer",
+                            "owner_only": True,
                             "labels": {},
                             "resource": URL,
                             "start_url": "https://console.test/oauth/runlayer/start",
@@ -170,7 +171,8 @@ def test_unsupported_negotiated_protocol_stops_before_discovery():
 def test_catalog_resource_must_be_an_exact_mcp_url(monkeypatch, resource):
     monkeypatch.setenv("CENTAUR_CONSOLE_URL", "http://console.local")
     app = {
-        "provider": "runlayer",
+        "slug": "runlayer",
+        "owner_only": True,
         "resource": resource,
         "start_url": "https://console.test/oauth/runlayer/start",
     }
@@ -182,5 +184,23 @@ def test_catalog_resource_must_be_an_exact_mcp_url(monkeypatch, resource):
     with (
         httpx.Client(transport=httpx.MockTransport(handler)) as http,
         pytest.raises(RunlayerError, match="MCP URL"),
+    ):
+        RunlayerClient(http_client=http).list_tools()
+
+
+def test_catalog_app_must_be_the_owner_only_runlayer_app(monkeypatch):
+    monkeypatch.setenv("CENTAUR_CONSOLE_URL", "http://console.local")
+    apps = [
+        {"slug": "runlayer", "owner_only": False, "resource": URL},
+        {"slug": "other", "owner_only": True, "resource": URL},
+    ]
+
+    def handler(request):
+        assert request.url.host == "console.local", "no MCP request without the Runlayer app"
+        return httpx.Response(200, json={"data": apps})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as http,
+        pytest.raises(RunlayerError, match="set up"),
     ):
         RunlayerClient(http_client=http).list_tools()

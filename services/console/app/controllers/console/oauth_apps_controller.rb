@@ -29,29 +29,31 @@ module Console
     end
 
     def preset
-      provider = Oauth::Providers.fetch(params[:provider])
-      unless provider&.respond_to?(:preset) && provider.respond_to?(:registration_endpoint)
-        return head :not_found
-      end
+      source = Oauth::Presets.fetch(params[:provider])
+      return head :not_found unless source
 
-      preset = provider.preset
+      preset = source.preset
+      provider_key = preset.fetch(:provider, source.key)
       app = OauthApp.find_by(slug: preset.fetch(:slug))
       unless app
-        # Providers bound to a tenant take its URL from the admin; registration
-        # then targets that tenant's endpoints.
-        provider_config = provider.respond_to?(:preset_config) ? provider.preset_config(params) : {}
-        provider = provider.class.new(config: provider_config) if provider_config.present?
-        if provider.respond_to?(:configured?) && !provider.configured?
-          return redirect_to console_integrations_path, alert: "Enter a valid #{provider.display_name} MCP URL."
+        # A standalone preset configures a generic provider from what the admin
+        # entered (e.g. a tenant URL); a provider-backed preset has fixed endpoints.
+        setup = if source.respond_to?(:setup_from)
+          source.setup_from(params)
+        else
+          { provider_config: {}, registration_endpoint: source.registration_endpoint }
+        end
+        unless setup
+          return redirect_to console_integrations_path, alert: "Enter a valid #{source.display_name} MCP URL."
         end
         registration = registration_client_factory.call.register(
-          endpoint: provider.registration_endpoint,
+          endpoint: setup.fetch(:registration_endpoint),
           redirect_uri: oauth_callback_redirect_uri(preset.fetch(:slug)),
           scope: preset.fetch(:allowed_scopes).join(" "),
-          auth_method: provider.respond_to?(:token_endpoint_auth_method) ? provider.token_endpoint_auth_method : "client_secret_post"
+          auth_method: source.respond_to?(:token_endpoint_auth_method) ? source.token_endpoint_auth_method : "client_secret_post"
         )
         begin
-          app = OauthApp.create!(preset.merge(registration).merge(provider: provider.key, provider_config: provider_config,
+          app = OauthApp.create!(preset.merge(registration).merge(provider: provider_key, provider_config: setup.fetch(:provider_config),
             enabled: true, created_by: current_user))
         rescue ActiveRecord::RecordNotUnique
           app = OauthApp.find_by!(slug: preset.fetch(:slug))
@@ -61,7 +63,8 @@ module Console
           app = OauthApp.find_by!(slug: preset.fetch(:slug))
         end
       end
-      unless app.provider == provider.key && app.shared? == preset.fetch(:shared) && app.enabled?
+      unless app.provider == provider_key && app.shared? == preset.fetch(:shared) &&
+          app.owner_only? == preset.fetch(:owner_only, false) && app.enabled?
         return redirect_to console_integrations_path, alert: "The preset conflicts with an existing OAuth app. Review its configuration."
       end
       redirect_to oauth_start_path(slug: app.slug)
@@ -90,6 +93,7 @@ module Console
       app.assign_attributes(fields)
       app.enabled = app_params[:enabled] == "1"
       app.shared = app_params[:shared] == "1" if app.new_record?
+      app.owner_only = app_params[:owner_only] == "1" if app.new_record?
       app.always_available = app_params[:always_available] == "1"
       app.allowed_scopes = line_list(app_params[:allowed_scopes])
       app.provider_config = provider_config_params(app.provider)
@@ -99,14 +103,12 @@ module Console
       app.client_secret = secret if secret.present?
     end
 
-    # Only the custom and runlayer providers take a config; blank fields are
-    # dropped so the model reports them as missing.
+    # Only the custom provider takes a config; blank fields are dropped so the
+    # model reports them as missing.
     def provider_config_params(provider)
-      keys = { Oauth::Providers::Custom::KEY => Oauth::Providers::Custom::CONFIG_KEYS,
-               Oauth::Providers::Runlayer::KEY => Oauth::Providers::Runlayer::CONFIG_KEYS }[provider]
-      return {} unless keys
+      return {} unless provider == Oauth::Providers::Custom::KEY
 
-      app_params.fetch(:provider_config, ActionController::Parameters.new).permit(*keys).to_h.transform_values(&:strip).compact_blank
+      app_params.fetch(:provider_config, ActionController::Parameters.new).permit(*Oauth::Providers::Custom::CONFIG_KEYS).to_h.transform_values(&:strip).compact_blank
     end
 
     def app_params

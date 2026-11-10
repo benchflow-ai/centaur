@@ -117,12 +117,12 @@ class SecretSource < ApplicationRecord
 
   private
 
-  # A personal Runlayer token is delivered only while it is live, its app is
+  # An owner-only token is delivered only while it is live, its app is
   # enabled, its owner is active, and this source belongs to the credential's
-  # own wrapper. Other providers keep their existing delivery behavior.
+  # own wrapper. Other apps keep their existing delivery behavior.
   def brokered_access_token
     credential = brokered_credential
-    return credential&.access_token unless credential&.oauth_app&.provider == Oauth::Providers::Runlayer::KEY
+    return credential&.access_token unless credential&.oauth_app&.owner_only?
     return nil if credential.dead? || (credential.expires_at && credential.expires_at <= Time.current)
     return nil unless credential.oauth_app.enabled? && credential.created_by&.active?
     return nil unless static_secret&.broker_credential_id == credential.id

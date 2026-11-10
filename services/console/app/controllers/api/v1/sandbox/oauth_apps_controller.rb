@@ -36,12 +36,12 @@ module Api
             labels: app.labels,
             provider: app.provider,
             allowed_scopes: app.allowed_scopes,
+            owner_only: app.owner_only,
+            # The protected resource (e.g. an MCP URL) a client connects to.
+            # Public metadata: iron-proxy injects the token, never served here.
+            resource: app.provider_config.is_a?(Hash) ? app.provider_config["resource"].presence : nil,
             start_url: oauth_start_url_for(app)
-          }.tap do |payload|
-            # The protected resource a personal MCP client connects to. Public
-            # metadata: tokens are injected by iron-proxy, never served here.
-            payload[:resource] = app.provider_config["resource"] if app.provider == Oauth::Providers::Runlayer::KEY
-          end
+          }
         end
 
         def oauth_start_url_for(app)
